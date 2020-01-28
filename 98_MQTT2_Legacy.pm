@@ -13,7 +13,7 @@ use constant {
 sub MQTT2_Legacy_Initialize {
 	my ($hash) = @_;
 
-	addToAttrList('_mqttPublish:textField-long');
+	addToAttrList("${ \ATTRIBUTE_PUBLISH }:textField-long");
 
 	$hash->{DefFn}				= "MQTT2_Legacy_Define";
 	$hash->{UndefFn}			= "MQTT2_Legacy_Undef";
@@ -25,9 +25,10 @@ sub MQTT2_Legacy_Initialize {
 
 sub MQTT2_Legacy_Define {
 	my ($hash, $def) = @_;
-	my $name = $hash->{'NAME'};
+	my ($name, $type, $io) = split /\s/, $def;
 
 	$hash->{'Device'} = {};
+	$hash->{'storage'}->{'io'} = $io;
 
 	MQTT2_Legacy_Run($hash) if ($init_done);
 	return undef;
@@ -35,8 +36,14 @@ sub MQTT2_Legacy_Define {
 
 sub MQTT2_Legacy_Run {
 	my ($hash) = @_;
+	my $io = $hash->{'storage'}->{'io'};
 
-	AssignIoPort($hash, 'mqtt');
+	if ($io and exists($defs{$io}) and $defs{$io}{'TYPE'} =~ m/^MQTT2_SERVER|MQTT2_CLIENT$/o) {
+		AssignIoPort($hash, 'mqtt');
+		Log3 ($hash->{'NAME'}, 3, sprintf ('[%s] io \'%s\' ready', $hash->{'NAME'}, $io));
+	} else {
+		Log3 ($hash->{'NAME'}, 1, sprintf ('[%s] MQTT server or client \'%s\' not found', $hash->{'NAME'}, $io));
+	};
 	return undef;
 };
 
@@ -53,21 +60,23 @@ sub MQTT2_Legacy_DeviceCfg {
 	if (my $p = AttrVal($deviceName, ATTRIBUTE_PUBLISH, undef)) {
 		my $syntax = 1;
 		while ($p) {
-			my ($e, $t, $v, $f) = (undef, undef, undef, '');
+			my ($d, $e, $t, $v, $f) = (undef, undef, undef, undef, '');
+			$syntax &&= (($p =~ s/\s*(publish)\s*:\s*//i) and ($d = $1) and 1);
 			($e = extract_codeblock($p, '{}')) or ($e = extract_delimited($p, qw( "' )));
 			$syntax &&= (defined($e) and length($e) and $p =~ s/^\s*,{1}\s*//);
 			($t = extract_codeblock($p, '{}')) or ($t = extract_delimited($p, qw( "' )));
 			$syntax &&= (defined($t) and length($t) and $p =~ s/^\s*,{1}\s*//);
 			($v = extract_codeblock($p, '{}')) or ($v = extract_delimited($p, qw( "' )));
-			$syntax &&= (defined($v) and length($v));
+			$syntax &&= (defined($v) and length($v) and 1);
 			# optional flags
-			if ($syntax &&= $p =~ s/^\s*,{1}\s*//) {
-				$syntax &&= (($p =~ s/(.+?);\s*//) and ($f = $1));
+			if ($p =~ s/^\s*,{1}\s*//) {
+				$syntax &&= (($p =~ s/(.+?);\s*//) and ($f = $1) and 1);
 			} else {
-				$syntax &&= $p =~ s/^\s*,{1}\s*//;
+				$syntax &&= $p =~ s/^\s*;{1}\s*//;
 			};
 			if ($syntax) {
 				push @result, {
+					'pusub'	=> $d,
 					'event'	=> $e,
 					'topic'	=> $t,
 					'value'	=> $v,
@@ -92,8 +101,8 @@ sub MQTT2_Legacy_Notify {
 	return if(!$events);
 
 	foreach my $event (@{$events}) {
-		my @e = split /\s/, $event; 
-		printf "event: [%s] device %s\n", $event, $dev->{'NAME'};
+		my @e = split /\s/, $event;
+		Log3 ($name, 3, sprintf('[%s] event:[%s], device:[%s]', $name, $event, $dev->{'NAME'}));
 		if ($dev->{'TYPE'} eq 'Global') {
 			if ($e[0] and $e[0] eq 'INITIALIZED') {
 				MQTT2_Legacy_Run($hash);
@@ -121,19 +130,22 @@ sub MQTT2_Legacy_Notify {
 		my $NAME 	= $dev->{'NAME'};
 		my $TYPE 	= $dev->{'TYPE'};
 		my $ALIAS	= AttrVal($NAME, 'alias', undef)||$NAME;
-		# remove trailing colon if present
-		my $EVT		= $e[0]; $EVT =~ s/:$//;
-		my $VAL 	= join(' ', @e)||'N/A';
 
 		my $cv = '';
 		for (my $i=0; $i<scalar(@e); $i++) {
 			$cv .= "my \$EVTPART$i = \$e[$i];";
 		};
 
+		# remove trailing colon if present
+		my $EVT		= shift @e; $EVT =~ s/:$//;
+		my $VAL 	= join(' ', @e)||'N/A';
+
 		# if we dont know that event - learn it
 		if (not exists($hash->{'Device'}->{$dev->{'NAME'}}->{'PublishSet'}->{$EVT})) {
 			my @actions;
 			foreach my $cfg (@{$hash->{'Device'}->{$dev->{'NAME'}}->{'PublishCfg'}}) {
+				# skip if its not a publish
+				next if (defined($cfg->{'pusub'}) and not ($cfg->{'pusub'} eq 'publish'));
 				my $m = eval $cv."$cfg->{'event'};";
 				if (eval { $EVT =~ /^$m$/ }) {
 					push @actions, $cfg;
@@ -183,7 +195,7 @@ sub MQTT2_Legacy_Notify {
 			$syntax &&= (($t = eval $cv.$action->{'topic'}) or LogError($@));
 			$syntax &&= (($v = eval $cv.$action->{'value'}) or LogError($@));
 			IOWrite($hash, "publish", "$t $v");
-			printf "topic:[%s]\tvalue:[%s]\tflags:[%s]\terr:%s\n", $t, $v, $action->{'flags'}, !$syntax if ($syntax);
+			Log3 ($NAME, 3, sprintf('[%s] publish topic:[%s], value:[%s], flags:[%s]', $NAME, $t, $v, $action->{'flags'})) if ($syntax);
 		};
 	};
 	return undef;
